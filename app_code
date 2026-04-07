@@ -38,7 +38,11 @@ BENCHMARK_COLUMNS = [
     "drg_code",
     "drg_desc",
     "drg_severity",
+]
+
+ACCEPTED_BENCHMARK_VALUE_COLUMNS = [
     "expected_los_days",
+    "benchmark_los_median",
 ]
 
 DISPLAY_COLUMNS = [
@@ -104,15 +108,26 @@ def build_benchmark_from_uploaded_data(df: pd.DataFrame) -> pd.DataFrame:
     return benchmark
 
 
+def standardize_benchmark_columns(benchmark: pd.DataFrame) -> pd.DataFrame:
+    bench = benchmark.copy()
+
+    if "expected_los_days" not in bench.columns:
+        if "benchmark_los_median" in bench.columns:
+            bench = bench.rename(columns={"benchmark_los_median": "expected_los_days"})
+        else:
+            raise ValueError(
+                "Benchmark file must contain either expected_los_days or benchmark_los_median."
+            )
+
+    return bench
+
+
 def merge_benchmark(encounters: pd.DataFrame, benchmark: pd.DataFrame) -> pd.DataFrame:
     merge_cols = ["drg_type", "drg_code", "drg_desc", "drg_severity"]
     merged = encounters.copy()
-    bench = benchmark.copy()
+    bench = standardize_benchmark_columns(benchmark.copy())
 
-    keep_cols = [c for c in BENCHMARK_COLUMNS if c in bench.columns]
-    if "expected_los_days" not in keep_cols:
-        raise ValueError("Benchmark file must contain expected_los_days.")
-
+    keep_cols = [c for c in BENCHMARK_COLUMNS if c in bench.columns] + ["expected_los_days"]
     bench = bench[keep_cols].drop_duplicates()
     bench["expected_los_days"] = pd.to_numeric(bench["expected_los_days"], errors="coerce")
 
@@ -257,6 +272,13 @@ if benchmark_file is not None:
         st.error(f"Benchmark file missing required columns: {', '.join(bench_missing)}")
         st.stop()
 
+    if not any(col in benchmark.columns for col in ACCEPTED_BENCHMARK_VALUE_COLUMNS):
+        st.error(
+            "Benchmark file missing required LOS column. Include either 'expected_los_days' or 'benchmark_los_median'."
+        )
+        st.stop()
+
+    benchmark = standardize_benchmark_columns(benchmark)
     benchmark["expected_los_days"] = pd.to_numeric(benchmark["expected_los_days"], errors="coerce")
     benchmark_source = "Uploaded benchmark file"
 else:
