@@ -1,0 +1,471 @@
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+
+st.set_page_config(page_title="LOS Compass",page_icon="🧭", layout="wide")
+
+
+# =========================================================
+# Config
+# =========================================================
+REQUIRED_COLUMNS = [
+    "patient_id",
+    "encounter_id",
+    "admit_datetime",
+    "discharge_datetime",
+    "los_days",
+    "readmit_30d_flag",
+    "age",
+    "sex",
+    "admit_source",
+    "discharge_disposition",
+    "drg_type",
+    "drg_code",
+    "drg_desc",
+    "drg_severity",
+    "drg_mortality",
+    "service_line",
+    "icu_flag",
+    "icu_los_days",
+    "vent_flag",
+    "vent_days",
+    "charlson_index",
+]
+
+BENCHMARK_COLUMNS = [
+    "drg_type",
+    "drg_code",
+    "drg_desc",
+    "drg_severity",
+    "expected_los_days",
+]
+
+DISPLAY_COLUMNS = [
+    "encounter_id",
+    "patient_id",
+    "drg_code",
+    "drg_desc",
+    "service_line",
+    "los_days",
+    "expected_los_days",
+    "los_variance_days",
+    "los_oe_index",
+    "readmit_30d_flag",
+    "icu_flag",
+    "vent_flag",
+    "charlson_index",
+    "admit_datetime",
+    "discharge_datetime",
+    "admit_source",
+    "discharge_disposition",
+]
+
+
+# =========================================================
+# Helpers
+# =========================================================
+def parse_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in ["admit_datetime", "discharge_datetime"]:
+        if col in out.columns:
+            out[col] = pd.to_datetime(out[col], errors="coerce")
+    return out
+
+
+def validate_required_columns(df: pd.DataFrame, required_cols: list[str]) -> tuple[bool, list[str]]:
+    missing = [c for c in required_cols if c not in df.columns]
+    return len(missing) == 0, missing
+
+
+def coerce_numeric(df: pd.DataFrame, numeric_cols: list[str]) -> pd.DataFrame:
+    out = df.copy()
+    for col in numeric_cols:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out
+
+
+def build_benchmark_from_uploaded_data(df: pd.DataFrame) -> pd.DataFrame:
+    benchmark = (
+        df.dropna(subset=["drg_code"])
+        .groupby(["drg_type", "drg_code", "drg_desc", "drg_severity"], dropna=False)
+        .agg(
+            n_cases=("encounter_id", "count"),
+            expected_los_days=("los_days", "median"),
+            benchmark_los_mean=("los_days", "mean"),
+            benchmark_los_p75=("los_days", lambda x: x.quantile(0.75)),
+        )
+        .reset_index()
+    )
+    benchmark["expected_los_days"] = pd.to_numeric(benchmark["expected_los_days"], errors="coerce").round(3)
+    benchmark["benchmark_los_mean"] = pd.to_numeric(benchmark["benchmark_los_mean"], errors="coerce").round(3)
+    benchmark["benchmark_los_p75"] = pd.to_numeric(benchmark["benchmark_los_p75"], errors="coerce").round(3)
+    return benchmark
+
+
+def merge_benchmark(encounters: pd.DataFrame, benchmark: pd.DataFrame) -> pd.DataFrame:
+    merge_cols = ["drg_type", "drg_code", "drg_desc", "drg_severity"]
+    merged = encounters.copy()
+    bench = benchmark.copy()
+
+    keep_cols = [c for c in BENCHMARK_COLUMNS if c in bench.columns]
+    if "expected_los_days" not in keep_cols:
+        raise ValueError("Benchmark file must contain expected_los_days.")
+
+    bench = bench[keep_cols].drop_duplicates()
+    bench["expected_los_days"] = pd.to_numeric(bench["expected_los_days"], errors="coerce")
+
+    # Drop benchmark-derived columns if they already exist in the uploaded encounter file
+    for col in ["expected_los_days", "los_variance_days", "los_oe_index", "excess_los_flag"]:
+        if col in merged.columns:
+            merged = merged.drop(columns=col)
+
+    merged = merged.merge(bench, on=merge_cols, how="left")
+
+    merged["los_variance_days"] = (
+        pd.to_numeric(merged["los_days"], errors="coerce")
+        - pd.to_numeric(merged["expected_los_days"], errors="coerce")
+    ).round(3)
+
+    merged["los_oe_index"] = np.where(
+        merged["expected_los_days"].notna() & (merged["expected_los_days"] > 0),
+        (
+            pd.to_numeric(merged["los_days"], errors="coerce")
+            / pd.to_numeric(merged["expected_los_days"], errors="coerce")
+        ).round(3),
+        np.nan,
+    )
+    return merged
+
+
+def build_validation_summary(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for col in REQUIRED_COLUMNS:
+        rows.append(
+            {
+                "column_name": col,
+                "present": col in df.columns,
+                "missing_values": int(df[col].isna().sum()) if col in df.columns else None,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def to_csv_download(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def format_metric(value, is_pct=False):
+    if pd.isna(value):
+        return "NA"
+    if is_pct:
+        return f"{value:.1%}"
+    if isinstance(value, (int, np.integer)):
+        return f"{value:,}"
+    return f"{value:,.2f}"
+
+
+# =========================================================
+# Header
+# =========================================================
+st.title("LOS Compass")
+st.caption("Turn LOS insights into action.")
+
+
+# =========================================================
+# Sidebar uploads
+# =========================================================
+with st.sidebar:
+    st.header("Upload files")
+    encounter_file = st.file_uploader(
+        "1) Encounter dataset (required)",
+        type=["csv"],
+        help="Upload app_input_v1.csv or a CSV with the same required schema.",
+    )
+    benchmark_file = st.file_uploader(
+        "2) Benchmark dataset (optional)",
+        type=["csv"],
+        help="Upload benchmark_v1.csv. If omitted, the app builds DRG median LOS benchmarks from the uploaded encounter file.",
+    )
+
+if encounter_file is None:
+    st.info("Upload your encounter-level CSV to begin.")
+    st.stop()
+
+
+# =========================================================
+# Load encounter data
+# =========================================================
+try:
+    encounters = pd.read_csv(encounter_file)
+except Exception as e:
+    st.error(f"Could not read encounter CSV: {e}")
+    st.stop()
+
+is_valid, missing_cols = validate_required_columns(encounters, REQUIRED_COLUMNS)
+
+st.subheader("1. Validation")
+validation_df = build_validation_summary(encounters)
+st.dataframe(validation_df, use_container_width=True, hide_index=True)
+
+if not is_valid:
+    st.error(f"Missing required columns: {', '.join(missing_cols)}")
+    st.stop()
+
+encounters = parse_datetime_columns(encounters)
+encounters = coerce_numeric(
+    encounters,
+    [
+        "los_days",
+        "readmit_30d_flag",
+        "age",
+        "drg_severity",
+        "drg_mortality",
+        "icu_flag",
+        "icu_los_days",
+        "vent_flag",
+        "vent_days",
+        "charlson_index",
+    ],
+)
+
+duplicate_encounters = int(encounters["encounter_id"].duplicated().sum())
+bad_admit_dt = int(encounters["admit_datetime"].isna().sum())
+bad_discharge_dt = int(encounters["discharge_datetime"].isna().sum())
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Rows loaded", f"{len(encounters):,}")
+c2.metric("Duplicate encounter_id", f"{duplicate_encounters:,}")
+c3.metric("Datetime parse issues", f"{bad_admit_dt + bad_discharge_dt:,}")
+
+
+# =========================================================
+# Load or build benchmark
+# =========================================================
+st.subheader("2. Expected LOS benchmark")
+
+if benchmark_file is not None:
+    try:
+        benchmark = pd.read_csv(benchmark_file)
+    except Exception as e:
+        st.error(f"Could not read benchmark CSV: {e}")
+        st.stop()
+
+    bench_valid, bench_missing = validate_required_columns(benchmark, BENCHMARK_COLUMNS)
+    if not bench_valid:
+        st.error(f"Benchmark file missing required columns: {', '.join(bench_missing)}")
+        st.stop()
+
+    benchmark["expected_los_days"] = pd.to_numeric(benchmark["expected_los_days"], errors="coerce")
+    benchmark_source = "Uploaded benchmark file"
+else:
+    benchmark = build_benchmark_from_uploaded_data(encounters)
+    benchmark_source = "Built from uploaded encounter data"
+
+st.success(f"Benchmark source: {benchmark_source}")
+st.dataframe(benchmark.head(10), use_container_width=True, hide_index=True)
+
+
+# =========================================================
+# Merge benchmark and calculate metrics
+# =========================================================
+try:
+    analysis_df = merge_benchmark(encounters, benchmark)
+except Exception as e:
+    st.error(f"Could not merge benchmark data: {e}")
+    st.stop()
+
+analysis_df["excess_los_flag"] = np.where(analysis_df["los_variance_days"] > 0, 1, 0)
+
+
+# =========================================================
+# Sidebar filters - AFTER data load
+# =========================================================
+available_service_lines = sorted(
+    [x for x in analysis_df["service_line"].dropna().unique().tolist() if str(x).strip() != ""]
+)
+
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("Filters")
+    filter_service_lines = st.multiselect(
+        "Service line",
+        options=available_service_lines,
+        default=available_service_lines,
+    )
+    only_excess_los = st.checkbox("Only show excess LOS > 0", value=False)
+    only_readmits = st.checkbox("Only show readmissions", value=False)
+
+filtered_df = analysis_df.copy()
+if filter_service_lines:
+    filtered_df = filtered_df[filtered_df["service_line"].isin(filter_service_lines)].copy()
+if only_excess_los:
+    filtered_df = filtered_df[filtered_df["los_variance_days"] > 0].copy()
+if only_readmits:
+    filtered_df = filtered_df[filtered_df["readmit_30d_flag"] == 1].copy()
+
+
+# =========================================================
+# System overview
+# =========================================================
+st.subheader("3. System Overview")
+
+total_excess_days = filtered_df["los_variance_days"].clip(lower=0).sum(skipna=True)
+avg_los = filtered_df["los_days"].mean()
+avg_expected_los = filtered_df["expected_los_days"].mean()
+readmit_rate = filtered_df["readmit_30d_flag"].mean()
+excess_case_rate = (filtered_df["los_variance_days"] > 0).mean() if len(filtered_df) > 0 else np.nan
+
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Admissions", f"{len(filtered_df):,}")
+m2.metric("Avg LOS", format_metric(avg_los))
+m3.metric("Avg expected LOS", format_metric(avg_expected_los))
+m4.metric("30-day readmit rate", format_metric(readmit_rate, is_pct=True))
+m5.metric("Total excess patient-days", format_metric(total_excess_days))
+
+m6, m7 = st.columns(2)
+m6.metric("Excess LOS cases", format_metric((filtered_df["los_variance_days"] > 0).sum()))
+m7.metric("Excess LOS case rate", format_metric(excess_case_rate, is_pct=True))
+
+
+# =========================================================
+# DRG performance
+# =========================================================
+st.subheader("4. DRG Performance")
+
+drg_summary = (
+    filtered_df.groupby(["drg_code", "drg_desc"], dropna=False)
+    .agg(
+        admissions=("encounter_id", "count"),
+        avg_los=("los_days", "mean"),
+        avg_expected_los=("expected_los_days", "mean"),
+        total_excess_days=("los_variance_days", lambda x: x.clip(lower=0).sum()),
+        avg_los_variance=("los_variance_days", "mean"),
+        readmit_rate=("readmit_30d_flag", "mean"),
+    )
+    .reset_index()
+    .sort_values(["total_excess_days", "admissions"], ascending=[False, False])
+)
+
+for col in ["avg_los", "avg_expected_los", "total_excess_days", "avg_los_variance", "readmit_rate"]:
+    if col in drg_summary.columns:
+        drg_summary[col] = drg_summary[col].round(3)
+
+st.dataframe(drg_summary, use_container_width=True, hide_index=True)
+
+
+# =========================================================
+# Priority discharge list
+# =========================================================
+st.subheader("5. Priority Discharge List")
+
+priority_df = filtered_df.copy()
+priority_df["priority_score"] = (
+    priority_df["los_variance_days"].fillna(0).clip(lower=0) * 2
+    + priority_df["readmit_30d_flag"].fillna(0) * 3
+    + priority_df["icu_flag"].fillna(0) * 0.5
+    + priority_df["vent_flag"].fillna(0) * 0.5
+).round(3)
+
+priority_df = priority_df.sort_values(
+    ["priority_score", "los_variance_days", "readmit_30d_flag"],
+    ascending=[False, False, False],
+)
+
+show_n = st.slider("Number of encounters to display", min_value=10, max_value=200, value=25, step=5)
+
+priority_display_cols = ["priority_score"] + [c for c in DISPLAY_COLUMNS if c in priority_df.columns]
+st.dataframe(
+    priority_df[priority_display_cols].head(show_n),
+    use_container_width=True,
+    hide_index=True,
+)
+
+
+# =========================================================
+# Service line insights
+# =========================================================
+st.subheader("6. Service Line Insights")
+
+service_summary = (
+    filtered_df.groupby("service_line", dropna=False)
+    .agg(
+        admissions=("encounter_id", "count"),
+        avg_los=("los_days", "mean"),
+        avg_expected_los=("expected_los_days", "mean"),
+        total_excess_days=("los_variance_days", lambda x: x.clip(lower=0).sum()),
+        readmit_rate=("readmit_30d_flag", "mean"),
+    )
+    .reset_index()
+    .sort_values("total_excess_days", ascending=False)
+)
+
+for col in ["avg_los", "avg_expected_los", "total_excess_days", "readmit_rate"]:
+    if col in service_summary.columns:
+        service_summary[col] = service_summary[col].round(3)
+
+st.dataframe(service_summary, use_container_width=True, hide_index=True)
+
+
+# =========================================================
+# Downloads
+# =========================================================
+st.subheader("7. Downloads")
+
+d1, d2, d3 = st.columns(3)
+with d1:
+    st.download_button(
+        label="Download analyzed encounters CSV",
+        data=to_csv_download(priority_df),
+        file_name="analyzed_encounters.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+with d2:
+    st.download_button(
+        label="Download DRG summary CSV",
+        data=to_csv_download(drg_summary),
+        file_name="drg_summary.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+with d3:
+    st.download_button(
+        label="Download service line summary CSV",
+        data=to_csv_download(service_summary),
+        file_name="service_line_summary.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+with st.expander("Expected input schema"):
+    schema_df = pd.DataFrame(
+        {
+            "column_name": REQUIRED_COLUMNS,
+            "description": [
+                "Unique patient identifier",
+                "Unique hospital encounter identifier",
+                "Hospital admission timestamp",
+                "Hospital discharge timestamp",
+                "Observed hospital length of stay in days",
+                "30-day all-cause readmission flag",
+                "Age at admission",
+                "Administrative sex field",
+                "Admission source/location",
+                "Discharge disposition/location",
+                "DRG grouping type",
+                "DRG code",
+                "DRG description",
+                "DRG severity subclass",
+                "DRG mortality subclass",
+                "Mapped service line category",
+                "ICU exposure flag",
+                "Total ICU LOS in days",
+                "Mechanical ventilation exposure flag",
+                "Total ventilation duration in days",
+                "Charlson comorbidity index",
+            ],
+        }
+    )
+    st.dataframe(schema_df, use_container_width=True, hide_index=True)
