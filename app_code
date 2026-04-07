@@ -3,7 +3,7 @@ import pandas as pd
 import streamlit as st
 
 
-st.set_page_config(page_title="LOS Compass",page_icon="🧭", layout="wide")
+st.set_page_config(page_title="LOS Compass", layout="wide")
 
 
 # =========================================================
@@ -360,6 +360,8 @@ drg_summary = (
     filtered_df.groupby(["drg_code", "drg_desc"], dropna=False)
     .agg(
         admissions=("encounter_id", "count"),
+        total_observed_los=("los_days", "sum"),
+        total_expected_los=("expected_los_days", "sum"),
         avg_los=("los_days", "mean"),
         avg_expected_los=("expected_los_days", "mean"),
         total_excess_days=("los_variance_days", lambda x: x.clip(lower=0).sum()),
@@ -367,10 +369,26 @@ drg_summary = (
         readmit_rate=("readmit_30d_flag", "mean"),
     )
     .reset_index()
-    .sort_values(["total_excess_days", "admissions"], ascending=[False, False])
 )
 
-for col in ["avg_los", "avg_expected_los", "total_excess_days", "avg_los_variance", "readmit_rate"]:
+drg_summary["los_oe_index"] = np.where(
+    drg_summary["total_expected_los"].notna() & (drg_summary["total_expected_los"] > 0),
+    (drg_summary["total_observed_los"] / drg_summary["total_expected_los"]).round(3),
+    np.nan,
+)
+
+drg_summary = drg_summary.sort_values(["total_excess_days", "admissions"], ascending=[False, False])
+
+for col in [
+    "total_observed_los",
+    "total_expected_los",
+    "avg_los",
+    "avg_expected_los",
+    "total_excess_days",
+    "avg_los_variance",
+    "readmit_rate",
+    "los_oe_index",
+]:
     if col in drg_summary.columns:
         drg_summary[col] = drg_summary[col].round(3)
 
@@ -414,16 +432,33 @@ service_summary = (
     filtered_df.groupby("service_line", dropna=False)
     .agg(
         admissions=("encounter_id", "count"),
+        total_observed_los=("los_days", "sum"),
+        total_expected_los=("expected_los_days", "sum"),
         avg_los=("los_days", "mean"),
         avg_expected_los=("expected_los_days", "mean"),
         total_excess_days=("los_variance_days", lambda x: x.clip(lower=0).sum()),
         readmit_rate=("readmit_30d_flag", "mean"),
     )
     .reset_index()
-    .sort_values("total_excess_days", ascending=False)
 )
 
-for col in ["avg_los", "avg_expected_los", "total_excess_days", "readmit_rate"]:
+service_summary["los_oe_index"] = np.where(
+    service_summary["total_expected_los"].notna() & (service_summary["total_expected_los"] > 0),
+    (service_summary["total_observed_los"] / service_summary["total_expected_los"]).round(3),
+    np.nan,
+)
+
+service_summary = service_summary.sort_values("total_excess_days", ascending=False)
+
+for col in [
+    "total_observed_los",
+    "total_expected_los",
+    "avg_los",
+    "avg_expected_los",
+    "total_excess_days",
+    "readmit_rate",
+    "los_oe_index",
+]:
     if col in service_summary.columns:
         service_summary[col] = service_summary[col].round(3)
 
