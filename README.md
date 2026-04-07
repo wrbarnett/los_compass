@@ -1,5 +1,11 @@
 # 🧭 LOS Compass
 
+<img width="256" height="256" alt="Screenshot 2026-04-07 103922" src="https://github.com/user-attachments/assets/7c785ac2-c61c-43c4-9011-fe413a7fb4c3" />
+
+<img width="256" height="256" alt="Screenshot 2026-04-07 104018" src="https://github.com/user-attachments/assets/8a40f8fd-3fc8-455a-897d-da16ea696291" />
+
+<img width="256" height="256" alt="Screenshot 2026-04-07 104100" src="https://github.com/user-attachments/assets/be55663b-dc0f-44e0-9982-c9e1f9caa6eb" />
+
 **Turn LOS insights into action.**
 
 LOS Compass is a lightweight hospital operations analytics app that identifies excess length of stay (LOS), benchmarks performance, and prioritizes actionable opportunities to improve throughput and reduce readmissions.
